@@ -3,8 +3,27 @@ Official implementation of "Selective Labeling Meets Semi-Supervised Neuron Segm
 ## Datasets
 ## Selective Labeling
 ### Pretraining
+```
+cd Pretraining
+```
+```
+python pretraining.py
+```
 ### CGS Selection
+```
+cd CGS
+```
+```
+python CGS.py
+```
 ## Semi-supervised Training
+```
+cd IIC-Net
+```
+```
+python warmup.py
+python semi_tuning.py
+```
 ### Supervised Warm-up
 ### Mixed-view Consistency Regularization
 ## Acknowledgement
