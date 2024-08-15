@@ -20,11 +20,13 @@ python CGS.py
 ```
 cd IIC-Net
 ```
+### Supervised Warm-up
 ```
 python warmup.py
+```
+### Mixed-view Consistency Regularization
+```
 python semi_tuning.py
 ```
-### Supervised Warm-up
-### Mixed-view Consistency Regularization
 ## Acknowledgement
 This code is based on [SSNS-Net](https://github.com/weih527/SSNS-Net) (IEEE TMI'22) by Huang Wei et al. The postprocessing tools are based on [constantinpape/elf](https://github.com/constantinpape/elf) and [funkey/waterz](https://github.com/funkey/waterz). Should you have any further questions, please let us know. Thanks again for your interest.
