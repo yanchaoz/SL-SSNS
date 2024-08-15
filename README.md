@@ -1,6 +1,5 @@
 # SL-SSNS
 Official implementation of "Selective Labeling Meets Semi-Supervised Neuron Segmentation" [paper]
-## Datasets
 ## Selective Labeling
 ### Pretraining
 ```
