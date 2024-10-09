@@ -1,5 +1,5 @@
 # SL-SSNS
-Official implementation of "Addressing Distribution Mismatch for Effective Semi-Supervised Neuron Segmentation" [under review]
+Official implementation of ["Addressing Distribution Mismatch for Effective Semi-Supervised Neuron Segmentation"](https://www.biorxiv.org/content/10.1101/2024.05.26.595303v1) [under review]
 ## Selective Labeling
 ### Pretraining
 ```
