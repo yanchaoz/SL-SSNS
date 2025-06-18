@@ -3,7 +3,7 @@ Official implementation of ["A Distribution-aware Semi-Supervised Pipeline for C
 
 ## 🧪 Demo: Subvolume Selection
 
-To help users better understand and apply our method, we provide an interactive demo by Colab, showcasing the **subvolume selection process** in both: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1vPYYeaycpdQjDiu_TQD4LqQbjezf40yc?usp=sharing)
+To help users better understand and apply our method, we provide an interactive demo by Colab [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1vPYYeaycpdQjDiu_TQD4LqQbjezf40yc?usp=sharing), showcasing the **subvolume selection process** in both:
 
 - The **spatial domain**
 ![image](https://github.com/user-attachments/assets/30a81673-03c6-4fd5-af86-c4d0ab60c2e5)
