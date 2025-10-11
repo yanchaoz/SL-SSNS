@@ -265,6 +265,17 @@ def euclidean_distances(x, y, squared=False):
     if not squared:
         np.sqrt(distances, distances)
     return distances
+import numpy as np
+
+def negative_cosine_distances(x, y):
+    assert isinstance(x, np.ndarray) and x.ndim == 2
+    assert isinstance(y, np.ndarray) and y.ndim == 2
+    assert x.shape[1] == y.shape[1]
+    x_norm = x / np.linalg.norm(x, axis=1, keepdims=True)
+    y_norm = y / np.linalg.norm(y, axis=1, keepdims=True)
+    sim_matrix = np.dot(x_norm, y_norm.T)
+    distances = -sim_matrix
+    return distances
 
 
 def get_score(label_list, dist_matrix):
