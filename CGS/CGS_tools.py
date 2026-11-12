@@ -1,372 +1,249 @@
-import pandas as pd
-import yaml
-import torch
-from tqdm import tqdm
-from addict import Dict as AttrDict
-from collections import OrderedDict
-from model.encoder import UNet_PNI_encoder
-import os
+"""Model, volume I/O and visualization helpers for CGS.
+
+Numerical selection lives in selection.py. Paths in YAML retain the historical
+CGS-directory base, so the CLI also works when launched from the repository root.
+"""
+
+import json
 import math
+from pathlib import Path
+from types import SimpleNamespace
+
 import h5py
-import imageio
+import imageio.v2 as imageio
 import numpy as np
+import torch
+import yaml
 from torch.utils.data import Dataset
-import umap
-import matplotlib.pyplot as plt
+from tqdm import tqdm
+
+from model.encoder import UNet_PNI_encoder
+from selection import (
+    euclidean_distances,
+    make_hard,
+    positive_triplet,
+    select_subvolumes,
+)
 
 
-def compute_padding_and_num(size: int, patch_size: int, stride: int):
-    """
-    Compute the required padding and number of patches for a given dimension.
-
-    Args:
-        size (int): Original size of the dimension.
-        patch_size (int): Size of the patch.
-        stride (int): Stride length.
-
-    Returns:
-        padding (int): Padding required to fit patches evenly.
-        num (int): Number of patches along this dimension.
-    """
+def compute_padding_and_num(size, patch_size, stride):
+    if patch_size <= 0 or stride <= 0 or size < patch_size:
+        raise ValueError("Each input dimension must fit a positive patch and stride")
     num = math.ceil((size - patch_size) / stride) + 1
-    total = stride * (num - 1) + patch_size
-    padding = total - size
-    return padding, num
+    return stride * (num - 1) + patch_size - size, num
 
 
 class ProviderValid(Dataset):
-    def __init__(self, cfg):
-        """
-        Dataset class for validation.
+    """Single-volume, z/y/x patch provider with the original high-end padding."""
 
-        Args:
-            cfg (object): Configuration object containing dataset and model info.
-        """
-        self.cfg = cfg
-        self.model_type = cfg.MODEL.model_type
-        self.crop_size = cfg.MODEL.crop_size
-        self.out_size = cfg.MODEL.out_size
-        self.stride = cfg.MODEL.stride
-        self.dataset_names = cfg.MODEL.data_list
-        self.data_folder = cfg.MODEL.folder_name
-
-        print(f"Validation dataset:", self.data_folder, self.dataset_names)
-
-        # Load all volumes
-        self.datasets = []
-        for name in self.dataset_names:
-            path = os.path.join(self.data_folder, name)
-            print(f"Loading {name} ...")
-            try:
-                with h5py.File(path, 'r') as f:
-                    data = f['main'][:][:100]
-            except Exception:
-                data = imageio.volread(path)[:100]
-            print(f"Loaded shape: {data.shape}")
-            self.datasets.append(data)
-
-        # Original shape of the first volume
-        self.original_shape = list(self.datasets[0].shape)
-
-        # Compute padding and patch numbers for z, y, x
-        self.valid_padding = [
-            *compute_padding_and_num(self.original_shape[0], self.crop_size[0], self.stride[0]),  # z
-            *compute_padding_and_num(self.original_shape[1], self.crop_size[1], self.stride[1]),  # y
-            *compute_padding_and_num(self.original_shape[2], self.crop_size[2], self.stride[2]),  # x
+    def __init__(self, cfg, max_slices=100):
+        self.crop_size = positive_triplet(cfg.MODEL.crop_size, "crop_size")
+        self.stride = positive_triplet(cfg.MODEL.stride, "stride")
+        if len(cfg.MODEL.data_list) != 1:
+            raise ValueError("CGS supports exactly one volume per run")
+        if max_slices < 0:
+            raise ValueError("max_slices must be nonnegative")
+        path = Path(cfg.MODEL.folder_name) / cfg.MODEL.data_list[0]
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        if h5py.is_hdf5(path):
+            with h5py.File(path, "r") as handle:
+                data = handle["main"][: max_slices or None]
+        else:
+            data = imageio.volread(path)[: max_slices or None]
+        if data.ndim != 3 or data.dtype != np.uint8:
+            raise ValueError("Input must be a 3D uint8 volume in (z, y, x) order")
+        self.original_shape = data.shape
+        geometry = [
+            compute_padding_and_num(s, p, step)
+            for s, p, step in zip(data.shape, self.crop_size, self.stride)
         ]
-
-        # Unpack padding and counts
-        self.padding_z, self.num_z = self.valid_padding[0], self.valid_padding[1]
-        self.padding_y, self.num_y = self.valid_padding[2], self.valid_padding[3]
-        self.padding_x, self.num_x = self.valid_padding[4], self.valid_padding[5]
-
-        # Apply symmetric reflection padding
-        pad_width = (
-            (0, 2 * self.padding_z),
-            (0, 2 * self.padding_y),
-            (0, 2 * self.padding_x),
+        self.valid_padding = [v for pair in geometry for v in pair]
+        (
+            self.padding_z,
+            self.num_z,
+            self.padding_y,
+            self.num_y,
+            self.padding_x,
+            self.num_x,
+        ) = self.valid_padding
+        self.datasets = [
+            np.pad(data, [(0, 2 * pad) for pad, _ in geometry], mode="reflect")
+        ]
+        self.padded_shape = self.datasets[0].shape
+        self.total_patches = self.patches_per_volume = (
+            self.num_z * self.num_y * self.num_x
         )
-        self.datasets = [np.pad(d, pad_width, mode='reflect') for d in self.datasets]
-
-        self.padded_shape = list(self.datasets[0].shape)
-        self.patches_per_volume = self.num_z * self.num_y * self.num_x
-        print(self.num_z, self.num_y, self.num_x)
-        self.total_patches = self.patches_per_volume * len(self.datasets)
 
     def __len__(self):
-        """
-        Returns total number of patch samples.
-        """
         return self.total_patches
 
     def __getitem__(self, index):
-        """
-        Retrieve a single patch based on index.
-
-        Args:
-            index (int): Linear index for patch retrieval.
-
-        Returns:
-            patch (np.ndarray): A single normalized patch of shape (1, D, H, W).
-        """
-        # Determine volume and local patch index
-        volume_idx = index // self.patches_per_volume
-        local_idx = index % self.patches_per_volume
-
-        # Decode 3D position from index
-        z_idx = local_idx // (self.num_y * self.num_x)
-        rem = local_idx % (self.num_y * self.num_x)
-        y_idx = rem // self.num_x
-        x_idx = rem % self.num_x
-
-        # Compute crop start and end positions
-        start_z = z_idx * self.stride[0]
-        start_y = y_idx * self.stride[1]
-        start_x = x_idx * self.stride[2]
-
-        end_z = start_z + self.crop_size[0]
-        end_y = start_y + self.crop_size[1]
-        end_x = start_x + self.crop_size[2]
-
-        # Ensure boundaries don't exceed volume size
-        if end_z > self.padded_shape[0]:
-            start_z = self.padded_shape[0] - self.crop_size[0]
-            end_z = self.padded_shape[0]
-        if end_y > self.padded_shape[1]:
-            start_y = self.padded_shape[1] - self.crop_size[1]
-            end_y = self.padded_shape[1]
-        if end_x > self.padded_shape[2]:
-            start_x = self.padded_shape[2] - self.crop_size[2]
-            end_x = self.padded_shape[2]
-
-        pos = [start_z, start_y, start_x]
-        # Extract and normalize the patch
-        volume = self.datasets[volume_idx]
-        patch = volume[start_z:end_z, start_y:end_y, start_x:end_x].copy()
-        patch = patch.astype(np.float32) / 255.0
-        patch = patch[np.newaxis, ...]  # Add channel dimension
-        return np.ascontiguousarray(patch, dtype=np.float32), np.array(pos, dtype=np.int32)
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        z, remainder = divmod(index, self.num_y * self.num_x)
+        y, x = divmod(remainder, self.num_x)
+        position = np.array(
+            [v * s for v, s in zip((z, y, x), self.stride)], dtype=np.int32
+        )
+        slices = tuple(
+            slice(start, start + size) for start, size in zip(position, self.crop_size)
+        )
+        patch = self.datasets[0][slices].astype(np.float32) / 255.0
+        return np.ascontiguousarray(patch[None]), position
 
 
 def load_config(cfg_name):
-    """Load configuration file as an AttrDict object."""
-    config_path = os.path.join('./config', cfg_name + '.yaml')
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-    print(f'Loading config from: {config_path}')
-    with open(config_path, 'r') as f:
-        return AttrDict(yaml.safe_load(f))
+    base = Path(__file__).resolve().parent
+    path = Path(cfg_name)
+    if path.suffix not in (".yaml", ".yml"):
+        path = base / "config" / f"{cfg_name}.yaml"
+    with path.open(encoding="utf-8") as handle:
+        raw = yaml.safe_load(handle)
+    cfg = SimpleNamespace(
+        **{
+            key: SimpleNamespace(**value) if isinstance(value, dict) else value
+            for key, value in raw.items()
+        }
+    )
+    for field in ("folder_name", "model_pth"):
+        value = Path(getattr(cfg.MODEL, field))
+        setattr(cfg.MODEL, field, str(value if value.is_absolute() else base / value))
+    return cfg
 
 
 def load_model(cfg, checkpoint_path, device):
-    """Initialize the model and load pre-trained weights."""
-    print('Initializing Superhuman model...')
     model = UNet_PNI_encoder(
         in_planes=cfg.MODEL.input_nc,
         filters=cfg.MODEL.filters,
         pad_mode=cfg.MODEL.pad_mode,
         bn_mode=cfg.MODEL.bn_mode,
         relu_mode=cfg.MODEL.relu_mode,
-        init_mode=cfg.MODEL.init_mode
+        init_mode=cfg.MODEL.init_mode,
     ).to(device)
-
-    print(f'Loading checkpoint: {checkpoint_path}')
-    if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    state_dict = checkpoint.get('model_weights', checkpoint)
-
-    # Remove 'module.' prefix if trained with DataParallel
-    new_state_dict = OrderedDict((k.replace('module.', ''), v) for k, v in state_dict.items())
-    model.load_state_dict(new_state_dict)
-    model.eval()
-    return model
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    state = checkpoint.get("model_weights", checkpoint)
+    model.load_state_dict(
+        {key.removeprefix("module."): value for key, value in state.items()}
+    )
+    return model.eval()
 
 
 def run_inference(model, val_loader, provider, device):
-    """Run inference on validation data and extract embeddings and positions."""
     features, positions = [], []
-    print(f'Running inference on {len(provider)} sub-volumes...')
-    pbar = tqdm(total=len(provider), desc='Extracting Features')
-
-    for data, pos in val_loader:
-        inputs = data.to(device, non_blocking=True)
-        with torch.no_grad():
-            outputs = model(inputs)
-            features.append(outputs.cpu().numpy())
+    with (
+        torch.inference_mode(),
+        tqdm(total=len(provider), desc="Extracting features") as progress,
+    ):
+        for data, pos in val_loader:
+            features.append(model(data.to(device)).cpu().numpy())
             positions.append(pos.numpy())
-        pbar.update(1)
-    pbar.close()
-    return np.concatenate(features, axis=0), np.array(positions)
+            progress.update(len(data))
+    # Keep historical (N, 1, 3) coordinates independently of loader batch size.
+    return np.concatenate(features), np.concatenate(positions)[:, None, :]
 
 
-def save_results(n_neighbors_list, subvolume_num, features, positions, window_size, point_cloud_size):
-    """Perform CGS patch selection and save results."""
-    print('Computing pairwise distances...')
-    dist_matrix_soft = euclidean_distances(features, features)
-    os.makedirs('./record', exist_ok=True)
-    print('UMAP Projection...')
-    reducer = umap.UMAP(random_state=40)
-    x_dr = reducer.fit_transform(features)
-    umap1, umap2 = x_dr[:][:, 0], x_dr[:][:, 1]
-    for n_neighbors in n_neighbors_list:
-        print(f'\nSelecting subvolumes with {n_neighbors} neighbors...')
-        dist_matrix = make_hard(dist_matrix_soft, n_neighbors)
-        already_selected = []
+def save_results(
+    n_neighbors_list,
+    subvolume_num,
+    features,
+    positions,
+    window_size,
+    point_cloud_size,
+    output_dir="record",
+    make_plots=True,
+    show_plots=False,
+):
+    output_dir = Path(output_dir)
+    if output_dir.exists():
+        raise FileExistsError(f"Output already exists: {output_dir}")
+    if not n_neighbors_list or len(set(n_neighbors_list)) != len(n_neighbors_list):
+        raise ValueError("Provide distinct neighbor counts")
+    distances = euclidean_distances(features, features)
+    selections = {}
+    for neighbors in n_neighbors_list:
+        coverage = make_hard(distances, neighbors)
+        selections[neighbors] = select_subvolumes(
+            coverage, positions, point_cloud_size, window_size, subvolume_num
+        )
+    embedding = None
+    if make_plots:
+        import umap
 
-        for iteration in range(subvolume_num):
-            best_score = -1
-            best_patch = []
-            best_positions = []
-
-            for z in range(point_cloud_size[0] - window_size[0] + 1):
-                for y in range(point_cloud_size[1] - window_size[1] + 1):
-                    for x in range(point_cloud_size[2] - window_size[2] + 1):
-                        start_idx = z * point_cloud_size[1] * point_cloud_size[2] + y * point_cloud_size[2] + x
-                        candidate_ids, candidate_pos = generate_candidate_points(
-                            start_idx, window_size, point_cloud_size, positions
-                        )
-                        score = get_score(candidate_ids + already_selected, dist_matrix)
-
-                        if score > best_score and notoverlap(candidate_ids, already_selected):
-                            best_score = score
-                            best_patch = candidate_ids
-                            best_positions = candidate_pos
-
-            already_selected += best_patch
-            umap_subv(umap1, umap2, features, already_selected, dist_matrix, n_neighbors, iteration)
-            np.save(f'./record/list_{n_neighbors}_{iteration}.npy', best_patch)
-            np.save(f'./record/position_{n_neighbors}_{iteration}.npy', best_positions)
-            print(f'Saved subvolume {iteration + 1}/{subvolume_num} | Score: {best_score:.4f}')
-
-
-def Get_List_Max_Index(list_, n):
-    N_large = pd.DataFrame({'score': list_}).sort_values(by='score', ascending=[False])
-    return list(N_large.index)[:n], sum(list(N_large.score)[:n])
-
-
-def euclidean_distances(x, y, squared=False):
-    assert isinstance(x, np.ndarray) and x.ndim == 2
-    assert isinstance(y, np.ndarray) and y.ndim == 2
-    assert x.shape[1] == y.shape[1]
-
-    x_square = np.sum(x * x, axis=1, keepdims=True)
-    if x is y:
-        y_square = x_square.T
-    else:
-        y_square = np.sum(y * y, axis=1, keepdims=True).T
-    distances = np.dot(x, y.T)
-    distances *= -2
-    distances += x_square
-    distances += y_square
-    np.maximum(distances, 0, distances)
-    if x is y:
-        distances.flat[::distances.shape[0] + 1] = 0.0
-    if not squared:
-        np.sqrt(distances, distances)
-    return distances
-import numpy as np
-
-def negative_cosine_distances(x, y):
-    assert isinstance(x, np.ndarray) and x.ndim == 2
-    assert isinstance(y, np.ndarray) and y.ndim == 2
-    assert x.shape[1] == y.shape[1]
-    x_norm = x / np.linalg.norm(x, axis=1, keepdims=True)
-    y_norm = y / np.linalg.norm(y, axis=1, keepdims=True)
-    sim_matrix = np.dot(x_norm, y_norm.T)
-    distances = -sim_matrix
-    return distances
+        if len(features) < 4:
+            raise ValueError(
+                "UMAP requires at least four patches; use --no-plots for tiny inputs"
+            )
+        embedding = umap.UMAP(random_state=40).fit_transform(features)
+    output_dir.mkdir(parents=True, exist_ok=False)
+    summary = []
+    for neighbors, results in selections.items():
+        coverage = make_hard(distances, neighbors) if make_plots else None
+        selected = []
+        for iteration, result in enumerate(results):
+            selected.extend(result.patch_ids)
+            np.save(output_dir / f"list_{neighbors}_{iteration}.npy", result.patch_ids)
+            np.save(
+                output_dir / f"position_{neighbors}_{iteration}.npy", result.positions
+            )
+            if make_plots:
+                plot_selection(
+                    embedding,
+                    selected,
+                    coverage,
+                    output_dir / f"umap_{neighbors}_{iteration}.png",
+                    show=show_plots,
+                )
+            summary.append(
+                dict(
+                    neighbors=int(neighbors), iteration=iteration, covered=result.score
+                )
+            )
+    (output_dir / "selection.json").write_text(
+        json.dumps(summary, indent=2), encoding="utf-8"
+    )
+    return selections
 
 
-def get_score(label_list, dist_matrix):
-    covered_list = []
-    for sample in label_list:
-        sub_coverlist = list(np.where(dist_matrix[sample] != 0)[0])
-        covered_list += sub_coverlist
-    covered_set = list(set(covered_list))
-    return len(covered_set)
-
-
-def get_cover_list(label_list, n_neighbors, dist_matrix):
-    covered_list = []
-    for sample in label_list:
-        a, b = Get_List_Max_Index(-dist_matrix[sample], n_neighbors)
-        sub_coverlist = a
-        covered_list += sub_coverlist
-    covered_set = list(set(covered_list))
-    return covered_set
-
-
-def make_hard(dist_matrix, n_neighbors):
-    hard_list = []
-    for index in range(dist_matrix.shape[0]):
-        th = np.partition(-dist_matrix[index], -n_neighbors)[-n_neighbors]
-        hard_sub_list = np.uint(-dist_matrix[index] >= th)
-        hard_list.append(hard_sub_list)
-    return np.array(hard_list)
-
-
-def generate_candidate_points(start_point, window_size, point_cloud_size, position):
-    window_list = []
-    position_list = []
-    for index_z in range(window_size[0]):
-        for index_y in range(window_size[1]):
-            for index_x in range(window_size[2]):
-                window_list.append(
-                    start_point + index_z * (point_cloud_size[1] * point_cloud_size[2]) + index_y * point_cloud_size[
-                        1] + index_x)
-                position_list.append(
-                    position[start_point + index_z * (point_cloud_size[1] * point_cloud_size[2]) + index_y *
-                             point_cloud_size[1] + index_x])
-    return window_list, position_list
-
-
-def notoverlap(start_list, already_list):
-    for i in start_list:
-        if i in already_list:
-            return False
-    return True
-
-
-def extract_subvolume(cfg, window_size, stride, patch_size, volume):
-    n_neighbors_list = cfg.CGS.n_neighbors_list
-    # print(n_neighbors_list)
-    for n_neighbors in n_neighbors_list:
+def extract_subvolume(
+    cfg, window_size, stride, patch_size, volume, output_dir="record"
+):
+    output_dir = Path(output_dir)
+    size = [s * (w - 1) + p for s, w, p in zip(stride, window_size, patch_size)]
+    for neighbors in cfg.CGS.n_neighbors_list:
         for iteration in range(cfg.CGS.subvolume_num):
-            print('saving..')
-            position_list = np.load(f'./record/position_{n_neighbors}_{iteration}.npy')
-            subvol_size = [stride[i] * (window_size[i] - 1) + patch_size[i] for i in range(3)]
-            z, y, x = position_list[0][0]
-            subvolume = volume[z:z + subvol_size[0], y:y + subvol_size[1], x:x + subvol_size[2]]
-            imageio.volwrite(f'./record/subvolume_{n_neighbors}_{iteration}.tif', subvolume)
+            positions = np.load(
+                output_dir / f"position_{neighbors}_{iteration}.npy", allow_pickle=False
+            )
+            start = positions.reshape(-1, 3)[0]
+            crop = volume[tuple(slice(int(p), int(p + n)) for p, n in zip(start, size))]
+            if crop.shape != tuple(size):
+                raise ValueError("Selected subvolume extends beyond the padded input")
+            imageio.volwrite(
+                output_dir / f"subvolume_{neighbors}_{iteration}.tif", crop
+            )
 
 
-def umap_subv(x1, x2, features, select_list, dist_matrix, n_neighbors, iteration):
-    cover_list = get_cover_list(select_list, n_neighbors, dist_matrix)
-    x1_e = []
-    x2_e = []
-    plt.figure()
-    for k in range(features.shape[0]):
-        if (k not in select_list) and (k not in cover_list):
-            x1_e.append(x1[k])
-            x2_e.append(x2[k])
+def plot_selection(embedding, selected, coverage, path, show=False):
+    import matplotlib
 
-    plt.scatter(x1_e, x2_e, color='deepskyblue', s=3, label='Others')
-    x1_c = []
-    x2_c = []
-    for j in range(features.shape[0]):
-        if (j not in select_list) and (j in cover_list):
-            x1_c.append(x1[j])
-            x2_c.append(x2[j])
-    plt.scatter(x1_c, x2_c, color='orange', marker='x', s=6, label='Covered vector')
-    x1_s = []
-    x2_s = []
-    for i in range(features.shape[0]):
-        if (i in select_list):
-            x1_s.append(x1[i])
-            x2_s.append(x2[i])
-    plt.scatter(x1_s, x2_s, color='red', marker='*', s=6, label='Selected vector')
-    plt.xlabel('UMAP 1')
-    plt.ylabel('UMAP 2')
-    plt.savefig(f'./record/umap_{n_neighbors}_{iteration}')
-    plt.show(block=True)
+    if not show:
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    selected_mask = np.zeros(len(embedding), dtype=bool)
+    selected_mask[selected] = True
+    covered = np.any(coverage[selected], axis=0)
+    fig, ax = plt.subplots()
+    for mask, color, marker, label in (
+        (~covered & ~selected_mask, "deepskyblue", ".", "Others"),
+        (covered & ~selected_mask, "orange", "x", "Covered"),
+        (selected_mask, "red", "*", "Selected"),
+    ):
+        ax.scatter(*embedding[mask].T, color=color, marker=marker, s=6, label=label)
+    ax.set(xlabel="UMAP 1", ylabel="UMAP 2")
+    ax.legend()
+    fig.savefig(path)
+    if show:
+        plt.show()
+    plt.close(fig)

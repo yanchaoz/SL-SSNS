@@ -4,8 +4,6 @@ from __future__ import division
 
 import torch.nn as nn
 import torch
-import sys
-sys.path.append('/home/zhangyc/2023_project/pretrain')
 from model.basic import conv3dBlock
 from model.residual import resBlock_pni
 

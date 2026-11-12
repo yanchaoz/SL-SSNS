@@ -1,11 +1,9 @@
 # Dependencies identified from CGS imports; not a validated environment lock.
 # Install the appropriate CPU/CUDA PyTorch build separately before this file.
 # Pretraining and IIC-Net postprocessing require additional dependencies.
-torch
-numpy
+torch>=2.6,<3
+numpy>=1.24,<3
 PyYAML
-addict
-pandas
 h5py
 imageio
 tifffile

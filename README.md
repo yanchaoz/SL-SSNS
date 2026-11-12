@@ -38,11 +38,11 @@ The [Colab demo](https://colab.research.google.com/drive/1vPYYeaycpdQjDiu_TQD4Lq
 | `IIC-Net/` | Segmentation model, data providers, losses and postprocessing utilities | [Training release status](IIC-Net/README.md) |
 
 > [!IMPORTANT]
-> The current checkout includes the CGS entry point and pretraining source. The `warmup.py` and `semi_tuning.py` entry points are **not included**, so end-to-end IIC-Net training cannot be launched from this checkout. Pretraining also needs the configuration and compatibility checks described in its guide.
+> The current checkout includes the CGS entry point and pretraining source. The `warmup.py` and `semi_tuning.py` entry points are **not included**, so end-to-end IIC-Net training cannot be launched from this checkout. Pretraining requires the data layout and environment described in its guide.
 
 ## Installation
 
-Create an isolated Python environment for local CGS selection:
+Use Python 3.10 or newer and create an isolated environment for local CGS selection:
 
 ```bash
 git clone https://github.com/yanchaoz/SL-SSNS.git
@@ -56,7 +56,7 @@ Activate it with `source .venv/bin/activate` on Linux/macOS or `.venv\Scripts\Ac
 python -m pip install -r requirements-cgs.txt
 ```
 
-This dependency list is derived from the CGS imports; it is **not a version-locked reproduction environment**. Dependency installation and full selection have not been validated across platforms. Pretraining has additional dependencies and compatibility requirements; see its [environment notes](Pretrain/README.md#environment-and-compatibility).
+The maintained code uses PyTorch 2.6 or newer and loads tensor checkpoints with `weights_only=True`. These dependencies are **not a version-locked reproduction environment**. For pretraining, install `requirements-pretrain.txt`; see its [environment notes](Pretrain/README.md#environment-and-compatibility). The [development guide](docs/DEVELOPMENT.md) describes the synthetic CPU regression tests and their limits.
 
 ## Data and models
 
@@ -75,20 +75,19 @@ For the complete dataset list and experimental splits, consult the paper's [key 
 
 Prepare a single grayscale volume in `(z, y, x)` order and edit [`CGS/config/SL.yaml`](CGS/config/SL.yaml) to set the input path and selection budget. The loader divides intensities by 255, so prepare data on the expected 8-bit intensity scale.
 
-Before running, read the [CGS guide](CGS/README.md): the current script selects `cuda:3` whenever CUDA is available, reads only the **first 100 z-slices**, and writes to a fixed `record/` directory. Adjust the device in `CGS.py` for your machine and preserve earlier outputs before another run.
+The [CGS guide](CGS/README.md) describes the input requirements and output files. The default still reads the **first 100 z-slices**; use `--max-slices 0` to process the full supplied volume. Choose a new output directory for each run.
 
 From the repository root:
 
 ```bash
-cd CGS
-python CGS.py --cfg SL
+python CGS/CGS.py --cfg SL --device cpu --output-dir runs/selection --no-plots
 ```
 
-`--cfg SL` selects `CGS/config/SL.yaml`; it is a configuration basename, not a file path. The output contains selected TIFF subvolumes, patch indices, coordinates and UMAP plots. These TIFFs are raw images to annotate, not predicted neuron labels.
+`--cfg SL` selects `CGS/config/SL.yaml`; an explicit YAML path is also accepted. Relative input/checkpoint paths in the YAML are resolved from `CGS/`, independently of the working directory. Use `--device cuda:0` for CUDA, or omit `--device` to select the first available CUDA device (otherwise CPU). The output contains selected TIFF subvolumes, patch indices, coordinates and coverage scores. Omit `--no-plots` to also save UMAP plots; `--show-plots` displays them interactively. These TIFFs are raw images to annotate, not predicted neuron labels.
 
 ### 2. Pretrain an encoder (optional)
 
-The included selection checkpoint lets you start with CGS without retraining. To investigate encoder pretraining, follow the [pretraining guide](Pretrain/README.md), which describes the actual entry point, expected AC3/AC4 layout and outstanding compatibility issues.
+The included selection checkpoint lets you start with CGS without retraining. To investigate encoder pretraining, follow the [pretraining guide](Pretrain/README.md), which describes the actual entry point, expected AC3/AC4 layout and checkpoint handling.
 
 ### 3. Train IIC-Net
 

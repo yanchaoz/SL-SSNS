@@ -38,3 +38,7 @@ Completing a reproducible training release requires the missing entry points, al
 The utilities include waterz and ELF-based postprocessing code. These require their own optional dependencies, including compiled segmentation libraries; they are not installed by [`requirements-cgs.txt`](../requirements-cgs.txt). Consult the [ELF](https://github.com/constantinpape/elf) and [waterz](https://github.com/funkey/waterz) projects for installation details and check compatibility with the helper APIs before use.
 
 For a missing script or reproducibility question, [open an issue](https://github.com/yanchaoz/SL-SSNS/issues) identifying the repository revision and the stage you are trying to run.
+
+## Maintained loss utilities
+
+The weighted MSE now follows the input device and retains its original normalization by batch size times spatial voxel count (excluding channels). Unlabeled MSE/BCE and CBST BCE return zero loss and zero prediction gradient for an empty confidence mask. Nonempty-mask formulas are unchanged. These focused fixes have CPU regression coverage; they do not supply the missing training entry points.

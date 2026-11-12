@@ -1,8 +1,10 @@
 from __future__ import print_function, division
+import math
 from torch.nn.modules.loss import _Loss
 import torch.nn.functional as F
 import torch
 import numpy as np
+
 
 class DiceLoss(_Loss):
     def __init__(self, size_average=True, reduce=True, smooth=100.0):
@@ -11,15 +13,17 @@ class DiceLoss(_Loss):
         self.reduce = reduce
 
     def dice_loss(self, input_y, target):
-        loss = 0.
+        loss = 0.0
 
         for index in range(input_y.size()[0]):
             iflat = input_y[index].view(-1)
             tflat = target[index].view(-1)
             intersection = (iflat * tflat).sum()
 
-            loss += 1 - ((2. * intersection + self.smooth) /
-                         ((iflat**2).sum() + (tflat**2).sum() + self.smooth))
+            loss += 1 - (
+                (2.0 * intersection + self.smooth)
+                / ((iflat**2).sum() + (tflat**2).sum() + self.smooth)
+            )
 
         # size_average=True for the dice loss
         return loss / float(input_y.size()[0])
@@ -29,15 +33,20 @@ class DiceLoss(_Loss):
         tflat = target.view(-1)
         intersection = (iflat * tflat).sum()
 
-        loss = 1 - ((2. * intersection + self.smooth) /
-                    ((iflat**2).sum() + (tflat**2).sum() + self.smooth))
+        loss = 1 - (
+            (2.0 * intersection + self.smooth)
+            / ((iflat**2).sum() + (tflat**2).sum() + self.smooth)
+        )
         return loss
 
     def forward(self, input_y, target):
         assert target.requires_grad is False
         if not (target.size() == input_y.size()):
             raise ValueError(
-                "Target size ({}) must be the same as input size ({})".format(target.size(), input_y.size()))
+                "Target size ({}) must be the same as input size ({})".format(
+                    target.size(), input_y.size()
+                )
+            )
 
         if self.reduce:
             loss = self.dice_loss(input_y, target)
@@ -52,9 +61,11 @@ class WeightedMSELoss(_Loss):
 
     @staticmethod
     def weighted_mse_loss(input_y, target, weight):
-        s1 = torch.prod(torch.tensor(input_y.size()[2:]).float())
-        s2 = input_y.size()[0]
-        norm_term = (s1 * s2).cuda()
+        # Historical normalization is batch * spatial size, without channels.
+        # A Python scalar follows the input device and avoids a CUDA allocation.
+        norm_term = input_y.shape[0] * math.prod(input_y.shape[2:])
+        if norm_term == 0:
+            raise ValueError("Weighted MSE requires nonempty inputs")
         return torch.sum(weight * (input_y - target) ** 2) / norm_term
 
     def forward(self, input_y, target, weight):
@@ -94,11 +105,14 @@ class WeightedBCELoss(_Loss):
 class WeightedBCELoss_cbst(_Loss):
     def __init__(self):
         super(WeightedBCELoss_cbst, self).__init__()
-    
+
     def binary_cross_entropy(self, input_y, target, weight):
         input_y = torch.clamp(input_y, min=0.000001, max=0.999999)
-        loss = -weight * (target * torch.log(input_y) + (1 - target) * torch.log(1 - input_y))
-        loss = torch.sum(loss) / torch.sum(weight != 0).float()  ### change
+        loss = -weight * (
+            target * torch.log(input_y) + (1 - target) * torch.log(1 - input_y)
+        )
+        # An empty confidence mask contributes zero loss and zero gradient.
+        loss = torch.sum(loss) / torch.sum(weight != 0).clamp_min(1)
         return loss
 
     def forward(self, input_y, target, weight):
@@ -112,12 +126,14 @@ class WeightedBCELoss_wo_label(_Loss):
         super(WeightedBCELoss_wo_label, self).__init__(size_average, reduce)
         self.size_average = size_average
         self.reduce = reduce
-    
+
     def binary_cross_entropy(self, input_y, target, weight):
-        loss = -weight * (target * torch.log(input_y) + (1 - target) * torch.log(1 - input_y))
+        loss = -weight * (
+            target * torch.log(input_y) + (1 - target) * torch.log(1 - input_y)
+        )
         loss = torch.sum(loss) / torch.numel(target)  ### change
         return loss
-    
+
     def gen_weight_mask(self, target, thresd):
         assert thresd >= 0.0 and thresd <= 1.0
         target.requires_grad = False
@@ -137,7 +153,9 @@ class WeightedBCELoss_wo_label(_Loss):
 
     def weighted_bce_loss_wo_label(self, input_y, thresd):
         target, weight, _ = self.gen_weight_mask(input_y.clone().detach(), thresd)
-        loss = F.binary_cross_entropy(input_y, target, weight, self.size_average, self.reduce)
+        loss = F.binary_cross_entropy(
+            input_y, target, weight, self.size_average, self.reduce
+        )
         # loss = self.binary_cross_entropy(input_y, target, weight)
         return loss, target, weight
 
@@ -145,21 +163,31 @@ class WeightedBCELoss_wo_label(_Loss):
         # split
         batch_size = target.size(0)
         for k in range(batch_size):
-            if torch.max(target[k:k+1, ...]) == 0:
-                target[k:k+1, ...], weight[k:k+1, ...], _ = self.gen_weight_mask(input_y[k:k+1, ...].clone().detach(), thresd)
-        loss = F.binary_cross_entropy(input_y, target, weight, self.size_average, self.reduce)
+            if torch.max(target[k : k + 1, ...]) == 0:
+                target[k : k + 1, ...], weight[k : k + 1, ...], _ = (
+                    self.gen_weight_mask(
+                        input_y[k : k + 1, ...].clone().detach(), thresd
+                    )
+                )
+        loss = F.binary_cross_entropy(
+            input_y, target, weight, self.size_average, self.reduce
+        )
         return loss, target, weight
 
     def forward(self, input_y, target, weight, mode=0, thresd=1.0):
         # assert target.requires_grad is False
         if mode == 0:
-            loss = F.binary_cross_entropy(input_y, target, weight, self.size_average, self.reduce)
+            loss = F.binary_cross_entropy(
+                input_y, target, weight, self.size_average, self.reduce
+            )
             return loss, target, weight
         elif mode == 1:
             loss, target, weight = self.weighted_bce_loss_wo_label(input_y, thresd)
             return loss, target, weight
         else:
-            loss, target, weight = self.weighted_bce_loss_mix(input_y, target, weight, thresd)
+            loss, target, weight = self.weighted_bce_loss_mix(
+                input_y, target, weight, thresd
+            )
             return loss, target, weight
 
 
@@ -168,12 +196,14 @@ class WeightedBCELoss_wo_label_onlylabeled(_Loss):
         super(WeightedBCELoss_wo_label_onlylabeled, self).__init__(size_average, reduce)
         self.size_average = size_average
         self.reduce = reduce
-    
+
     def binary_cross_entropy(self, input_y, target, weight):
-        loss = -weight * (target * torch.log(input_y) + (1 - target) * torch.log(1 - input_y))
+        loss = -weight * (
+            target * torch.log(input_y) + (1 - target) * torch.log(1 - input_y)
+        )
         loss = torch.sum(loss) / torch.numel(target)  ### change
         return loss
-    
+
     def gen_weight_mask(self, target, thresd):
         assert thresd >= 0.0 and thresd <= 1.0
         target.requires_grad = False
@@ -193,7 +223,9 @@ class WeightedBCELoss_wo_label_onlylabeled(_Loss):
 
     def weighted_bce_loss_wo_label(self, input_y, thresd):
         target, weight, _ = self.gen_weight_mask(input_y.clone().detach(), thresd)
-        loss = F.binary_cross_entropy(input_y, target, weight, self.size_average, self.reduce)
+        loss = F.binary_cross_entropy(
+            input_y, target, weight, self.size_average, self.reduce
+        )
         # loss = self.binary_cross_entropy(input_y, target, weight)
         return loss, target, weight
 
@@ -203,26 +235,33 @@ class WeightedBCELoss_wo_label_onlylabeled(_Loss):
         # for k in range(batch_size):
         #     if torch.max(target[k:k+1, ...]) == 0:
         #         target[k:k+1, ...], weight[k:k+1, ...], _ = self.gen_weight_mask(input_y[k:k+1, ...].clone().detach(), thresd)
-        loss = F.binary_cross_entropy(input_y, target, weight, self.size_average, self.reduce)
+        loss = F.binary_cross_entropy(
+            input_y, target, weight, self.size_average, self.reduce
+        )
         return loss, target, weight
 
     def forward(self, input_y, target, weight, mode=0, thresd=1.0):
         # assert target.requires_grad is False
         if mode == 0:
-            loss = F.binary_cross_entropy(input_y, target, weight, self.size_average, self.reduce)
+            loss = F.binary_cross_entropy(
+                input_y, target, weight, self.size_average, self.reduce
+            )
             return loss, target, weight
         elif mode == 1:
             loss, target, weight = self.weighted_bce_loss_wo_label(input_y, thresd)
             return loss, target, weight
         else:
-            loss, target, weight = self.weighted_bce_loss_mix(input_y, target, weight, thresd)
+            loss, target, weight = self.weighted_bce_loss_mix(
+                input_y, target, weight, thresd
+            )
             return loss, target, weight
+
 
 class TripletMarginLoss(_Loss):
     def __init__(self, margin=0.5):
         super(TripletMarginLoss, self).__init__()
         self.margin = margin
-    
+
     def forward(self, inputs):
         assert inputs.shape[0] == 3, "Batchsize must be 3"
         assert len(inputs.shape) == 2, "Dim must be 2"
@@ -243,10 +282,19 @@ class TripletMarginLoss(_Loss):
             loss *= 0
         return loss
 
+
 class DiscriminativeLoss_3d(_Loss):
-    # reference: 
-    def __init__(self, delta_var, delta_dist, norm, n_instance=2,
-                 size_average=True, reduce=True, usegpu=True):
+    # reference:
+    def __init__(
+        self,
+        delta_var,
+        delta_dist,
+        norm,
+        n_instance=2,
+        size_average=True,
+        reduce=True,
+        usegpu=True,
+    ):
         super(DiscriminativeLoss_3d, self).__init__(size_average)
 
         self.reduce = reduce
@@ -274,6 +322,7 @@ class DiscriminativeLoss_3d(_Loss):
 
 if __name__ == "__main__":
     import pdb
+
     for i in range(10):
         arr1 = np.random.random((1, 14, 160, 160))
         pdb.set_trace()

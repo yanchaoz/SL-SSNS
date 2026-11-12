@@ -182,7 +182,8 @@ class BSL(nn.Module):
             projection_size=256,
             projection_hidden_size=4096,
             moving_average_decay=0.99,
-            use_momentum=True
+            use_momentum=True,
+            sample_shape=(1, 18, 160, 160)
     ):
         super().__init__()
         self.net = net
@@ -203,7 +204,7 @@ class BSL(nn.Module):
 
         # send a mock image tensor to instantiate singleton parameters
 
-        self.forward(torch.randn(2, 1, 18, 160, 160, device=device), torch.randn(2, 1, 18, 160, 160, device=device))
+        self.forward(torch.randn(2, *sample_shape, device=device), torch.randn(2, *sample_shape, device=device))
 
     @singleton('target_encoder')
     def _get_target_encoder(self):

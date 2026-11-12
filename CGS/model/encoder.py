@@ -4,8 +4,6 @@ from __future__ import division
 
 import torch.nn as nn
 import torch
-import sys
-sys.path.append('/home/zhangyc/2023_project/SLmeetsSSL/pretrain')
 from model.basic import conv3dBlock
 from model.residual import resBlock_pni
 
@@ -72,11 +70,8 @@ class UNet_PNI_encoder(nn.Module):
 
     def forward(self, x):
         x = self.encoder(x)
-        # print(x.shape)
         x = self.avgpool(x)
-        # print(x.shape)
         x = torch.flatten(x, 1)
-        # print(x.shape)
         return x
 
 

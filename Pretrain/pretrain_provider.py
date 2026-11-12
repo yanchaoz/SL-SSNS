@@ -4,10 +4,8 @@ from __future__ import division
 import os
 import sys
 import h5py
-import time
 import random
 import numpy as np
-from PIL import Image
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 from utils.augmentation import SimpleAugment
@@ -16,8 +14,7 @@ from utils.consistency_aug_perturbations import GaussBlur
 from utils.consistency_aug_perturbations import GaussNoise
 from utils.consistency_aug_perturbations import Cutout
 from utils.consistency_aug_perturbations import Elastic
-from utils.augmentation import SimpleAugment as Filp
-import imageio
+import imageio.v2 as imageio
 
 
 class Train(Dataset):
@@ -30,11 +27,11 @@ class Train(Dataset):
         self.patch_size = [18, 160, 160]
         self.net_padding = [0, 0, 0]
 
-        if cfg.DATA.unlabel_dataset == 'ac3_ac4':
-            self.sub_path = 'snemi3d'
-            self.train_datasets = ['AC3_inputs.h5', 'AC4_inputs.h5']
+        if cfg.DATA.unlabel_dataset == "ac3_ac4":
+            self.sub_path = "snemi3d"
+            self.train_datasets = ["AC3_inputs.h5", "AC4_inputs.h5"]
         else:
-            raise AttributeError('No this dataset type!')
+            raise AttributeError("No this dataset type!")
 
         self.folder_name = os.path.join(cfg.DATA.data_folder, self.sub_path)
         self.simple_aug = SimpleAugment()
@@ -47,13 +44,17 @@ class Train(Dataset):
         # load dataset
         self.dataset = []
         for k in range(len(self.train_datasets)):
-            print('load ' + self.train_datasets[k] + ' ...')
-            try:
-                f_raw = h5py.File(os.path.join(self.folder_name, self.train_datasets[k]), 'r')
-                data = f_raw['main'][:]
-                f_raw.close()
-            except:
-                data = imageio.volread(os.path.join(self.folder_name, self.train_datasets[k]))
+            print("load " + self.train_datasets[k] + " ...")
+            path = os.path.join(self.folder_name, self.train_datasets[k])
+            if not os.path.isfile(path):
+                raise FileNotFoundError(path)
+            if h5py.is_hdf5(path):
+                with h5py.File(path, "r") as handle:
+                    data = handle["main"][:]
+            else:
+                data = imageio.volread(path)
+            if data.ndim != 3 or any(s < p for s, p in zip(data.shape, self.crop_size)):
+                raise ValueError(f"{path}: volume must fit a 3D {self.crop_size} crop")
             self.dataset.append(data)
 
         self.raw_data_shape = list(self.dataset[0].shape)
@@ -68,9 +69,11 @@ class Train(Dataset):
         random_y = random.randint(0, used_data_shape[1] - self.crop_from_origin[1])
         random_x = random.randint(0, used_data_shape[2] - self.crop_from_origin[2])
 
-        imgs = used_data[random_z:random_z + self.crop_from_origin[0], \
-               random_y:random_y + self.crop_from_origin[1], \
-               random_x:random_x + self.crop_from_origin[2]].copy()
+        imgs = used_data[
+            random_z : random_z + self.crop_from_origin[0],
+            random_y : random_y + self.crop_from_origin[1],
+            random_x : random_x + self.crop_from_origin[2],
+        ].copy()
 
         imgs = imgs.astype(np.float32) / 255.0
         [imgs] = self.simple_aug([imgs])
@@ -79,16 +82,13 @@ class Train(Dataset):
         imgs_aug2 = imgs.copy()
         imgs_aug2 = self.apply_perturbations(imgs_aug2)
 
-        sub_z1, sub_x1, sub_y1 = random.randint(0, 1), random.randint(0, 10), random.randint(0, 10)
-        if random.random() > 1.0:
-            sub_z2, sub_x2, sub_y2 = random.randint(0, 1), random.randint(0, 10), random.randint(0, 10)
-        else:
-            sub_z2, sub_x2, sub_y2 = sub_z1, sub_x1, sub_y1
-
-        imgs_aug1 = imgs_aug1[sub_z1:sub_z1 + self.patch_size[0], sub_x1:sub_x1 + self.patch_size[1],
-                    sub_y1:sub_y1 + self.patch_size[2]]
-        imgs_aug2 = imgs_aug2[sub_z2:sub_z2 + self.patch_size[0], sub_x2:sub_x2 + self.patch_size[1],
-                    sub_y2:sub_y2 + self.patch_size[2]]
+        # Both augmented views must remain aligned and keep a fixed batch shape.
+        # The original offsets sliced beyond an already cropped patch, producing
+        # variable-sized tensors that DataLoader could not stack.
+        if imgs_aug1.shape != tuple(self.patch_size) or imgs_aug2.shape != tuple(
+            self.patch_size
+        ):
+            raise ValueError("Augmentations must preserve the pretraining patch shape")
 
         imgs_aug1 = imgs_aug1[np.newaxis, ...]
         imgs_aug1 = np.ascontiguousarray(imgs_aug1, dtype=np.float32)
@@ -100,14 +100,28 @@ class Train(Dataset):
     def perturbations_init(self):
 
         self.per_intensity = Intensity()
-        self.per_gaussnoise = GaussNoise(min_std=self.min_noise_std, max_std=self.max_noise_std, norm_mode='trunc')
-        self.per_gaussblur = GaussBlur(min_kernel=self.min_kernel_size, max_kernel=self.max_kernel_size,
-                                       min_sigma=self.min_sigma, max_sigma=self.max_sigma)
+        self.per_gaussnoise = GaussNoise(
+            min_std=self.min_noise_std, max_std=self.max_noise_std, norm_mode="trunc"
+        )
+        self.per_gaussblur = GaussBlur(
+            min_kernel=self.min_kernel_size,
+            max_kernel=self.max_kernel_size,
+            min_sigma=self.min_sigma,
+            max_sigma=self.max_sigma,
+        )
         self.per_cutout = Cutout(model_type=self.model_type)
 
-        self.per_misalign = Elastic(control_point_spacing=[4, 40, 40], jitter_sigma=[0, 0, 0], prob_slip=0.2,
-                                    prob_shift=0.2, max_misalign=17, padding=20)
-        self.per_elastic = Elastic(control_point_spacing=[4, 40, 40], jitter_sigma=[0, 2, 2], padding=20)
+        self.per_misalign = Elastic(
+            control_point_spacing=[4, 40, 40],
+            jitter_sigma=[0, 0, 0],
+            prob_slip=0.2,
+            prob_shift=0.2,
+            max_misalign=17,
+            padding=20,
+        )
+        self.per_elastic = Elastic(
+            control_point_spacing=[4, 40, 40], jitter_sigma=[0, 2, 2], padding=20
+        )
 
     def apply_perturbations(self, data):
 
@@ -139,34 +153,36 @@ class Provider(object):
         self.batch_size = cfg.TRAIN.batch_size
         self.num_workers = cfg.TRAIN.num_workers
         self.is_cuda = cfg.TRAIN.if_cuda
+        self.cfg_device = getattr(cfg.TRAIN, "device", "cuda:0")
         self.data_iter = None
         self.iteration = 0
         self.epoch = 1
 
     def __len__(self):
-        return self.data.num_per_epoch
+        return len(self.data)
 
     def build(self):
         self.data_iter = iter(
-            DataLoader(dataset=self.data, batch_size=self.batch_size, num_workers=self.num_workers,
-                       shuffle=False, drop_last=False, pin_memory=True))
+            DataLoader(
+                dataset=self.data,
+                batch_size=self.batch_size,
+                num_workers=self.num_workers,
+                shuffle=False,
+                drop_last=False,
+                pin_memory=self.is_cuda,
+            )
+        )
 
     def next(self):
         if self.data_iter is None:
             self.build()
         try:
-            batch = self.data_iter.next()
-            self.iteration += 1
-            if self.is_cuda:
-                batch[0] = batch[0].cuda()
-                batch[1] = batch[1].cuda()
-            return batch
+            batch = next(self.data_iter)
         except StopIteration:
             self.epoch += 1
             self.build()
-            self.iteration += 1
-            batch = self.data_iter.next()
-            if self.is_cuda:
-                batch[0] = batch[0].cuda()
-                batch[1] = batch[1].cuda()
-            return batch
+            batch = next(self.data_iter)
+        self.iteration += 1
+        if self.is_cuda:
+            batch = [item.to(self.cfg_device) for item in batch]
+        return batch
