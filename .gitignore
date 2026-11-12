@@ -1,0 +1,21 @@
+# Local Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Local inputs and generated research outputs
+/CGS/data/*
+!/CGS/data/download.txt
+/CGS/record/
+/Pretrain/data/
+/Pretrain/caches/
+/Pretrain/models/
+/IIC-Net/data/
+/IIC-Net/caches/
+/IIC-Net/models/
+
+# Desktop metadata
+.DS_Store
+Thumbs.db
