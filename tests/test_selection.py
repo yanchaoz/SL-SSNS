@@ -156,3 +156,19 @@ def test_plot_colors_follow_coverage(stage_import, monkeypatch, tmp_path):
     np.testing.assert_array_equal(groups["Selected"], [[0, 0]])
     np.testing.assert_array_equal(groups["Others"], [[2, 2], [3, 3]])
     assert output.is_file()
+
+
+def test_bundled_checkpoint_load_and_forward(stage_import):
+    import torch
+
+    checkpoint = Path(__file__).resolve().parents[1] / "CGS/selection_model.ckpt"
+    if not checkpoint.exists():
+        pytest.skip(
+            "Bundled weights omitted by this sparse checkout; full-checkout CI runs this test"
+        )
+    tools = stage_import("CGS", "CGS_tools")
+    model = tools.load_model(tools.load_config("SL"), checkpoint, "cpu")
+    with torch.inference_mode():
+        embedding = model(torch.zeros(1, 1, 18, 160, 160))
+    assert embedding.shape == (1, 80)
+    assert torch.isfinite(embedding).all()
