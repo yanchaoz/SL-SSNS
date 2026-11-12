@@ -1,8 +1,17 @@
-from __future__ import print_function, division
+"""Confidence-weighted consistency losses with defined empty-mask behavior."""
+
 from torch.nn.modules.loss import _Loss
-import torch.nn.functional as F
 import torch
-import numpy as np
+
+
+def masked_mean(loss, weight):
+    """Retain sum(weight) normalization; no selected voxels means zero loss."""
+    denominator = weight.sum()
+    denominator = torch.where(
+        denominator == 0, torch.ones_like(denominator), denominator
+    )
+    return loss.sum() / denominator
+
 
 class MSELoss_unlabel(_Loss):
     def __init__(self):
@@ -13,8 +22,7 @@ class MSELoss_unlabel(_Loss):
         weight = weight.float()
         target = target.float()
         loss = weight * ((input_y - target) ** 2)
-        loss = torch.sum(loss) / torch.sum(weight)
-        return loss
+        return masked_mean(loss, weight)
 
 
 class BCELoss_unlabel(_Loss):
@@ -26,6 +34,7 @@ class BCELoss_unlabel(_Loss):
         input_y = torch.clamp(input_y, min=0.000001, max=0.999999)
         weight = weight.float()
         target = target.float()
-        loss = -weight* (target * torch.log(input_y) + (1 - target) * torch.log(1 - input_y))
-        loss = torch.sum(loss) / torch.sum(weight)
-        return loss
+        loss = -weight * (
+            target * torch.log(input_y) + (1 - target) * torch.log(1 - input_y)
+        )
+        return masked_mean(loss, weight)

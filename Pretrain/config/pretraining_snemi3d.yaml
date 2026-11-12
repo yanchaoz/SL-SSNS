@@ -48,7 +48,7 @@ TRAIN:
   min_valid_iter: 6000
 
 DATA:
-  dataset_name: 'ac3_ac4'
+  unlabel_dataset: 'ac3_ac4'
   min_noise_std: 0.01
   max_noise_std: 0.2
   min_kernel_size: 3
